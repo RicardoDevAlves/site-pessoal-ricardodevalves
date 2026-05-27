@@ -1,0 +1,61 @@
+---
+title: "Gerenciando Pool de Conexões no PostgreSQL com Node.js"
+date: "2025-04-10"
+description: "Como configurar corretamente o pool de conexões com pg e evitar os erros mais comuns em produção."
+tags: ["backend", "postgresql", "nodejs", "performance"]
+---
+
+Gerenciar conexões com banco de dados é um dos pontos que mais impacta a performance de APIs Node.js. Um pool mal configurado é a causa raiz de muitos problemas em produção.
+
+## O problema com conexões avulsas
+
+Criar uma nova conexão por request é um anti-padrão clássico. Cada conexão custa ~5ms de handshake TCP + autenticação. Em 100 req/s, isso vira 500ms de overhead puro por segundo.
+
+```ts
+// ❌ Não faça isso
+const client = new Client({ connectionString: process.env.DATABASE_URL })
+await client.connect()
+const result = await client.query('SELECT * FROM users WHERE id = $1', [id])
+await client.end()
+```
+
+## Usando Pool corretamente
+
+O `pg.Pool` mantém conexões abertas e as reutiliza entre requests:
+
+```ts
+import { Pool } from 'pg'
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 20,           // máximo de conexões simultâneas
+  idleTimeoutMillis: 30_000,
+  connectionTimeoutMillis: 2_000,
+})
+
+export async function query<T>(sql: string, params?: unknown[]): Promise<T[]> {
+  const { rows } = await pool.query(sql, params)
+  return rows as T[]
+}
+```
+
+## Configurando o tamanho do pool
+
+A fórmula base é `max_connections do Postgres ÷ número de instâncias da aplicação`. Se o Postgres aceita 100 conexões e você tem 5 pods, cada pod deve ter `max: 20`.
+
+Monitore `pg_stat_activity` para entender o uso real:
+
+```sql
+SELECT count(*), state
+FROM pg_stat_activity
+WHERE datname = 'minha_base'
+GROUP BY state;
+```
+
+## Tratando erros de pool esgotado
+
+Quando todas as conexões estão ocupadas, novos requests esperam até `connectionTimeoutMillis`. Se estourar, você recebe `Error: timeout exceeded when trying to connect`. Trate isso com retry ou circuit breaker — nunca deixe chegar até o usuário como 500.
+
+## Conclusão
+
+Pool bem configurado + monitoramento de conexões ativas resolvem ~80% dos problemas de performance relacionados ao banco. O restante é consulta mal escrita — mas isso é papo para outro post.
